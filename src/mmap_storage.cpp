@@ -139,21 +139,41 @@ namespace libtorrent {
 
 				if (m_part_file && use_partfile(i))
 				{
-					m_part_file->export_file([&f](std::int64_t file_offset, span<char> buf)
+					try
 					{
-						auto file_range = f->range().subspan(std::ptrdiff_t(file_offset));
-						TORRENT_ASSERT(file_range.size() >= buf.size());
-						sig::try_signal([&]{
-							std::memcpy(const_cast<char*>(file_range.data()), buf.data()
-								, static_cast<std::size_t>(buf.size()));
-							});
-					}, fs.file_offset(i), fs.file_size(i), ec.ec);
+						m_part_file->export_file([&f](std::int64_t file_offset, span<char> buf)
+							{
+							auto file_range = f->range().subspan(std::ptrdiff_t(file_offset));
+							TORRENT_ASSERT(file_range.size() >= buf.size());
+							sig::try_signal([&]{
+								std::memcpy(const_cast<char*>(file_range.data()), buf.data()
+									, static_cast<std::size_t>(buf.size()));
+								});
+							}, fs.file_offset(i), fs.file_size(i), ec.ec);
 
-					if (ec)
+						if (ec)
+						{
+							ec.file(i);
+							ec.operation = operation_t::partfile_write;
+							prio = m_file_priority;
+							return;
+						}
+					}
+					catch (std::system_error const& err)
 					{
 						ec.file(i);
 						ec.operation = operation_t::partfile_write;
-						prio = m_file_priority;
+#ifdef TORRENT_WINDOWS
+						if (err.code() == std::error_code(int(sig::seh_errors::in_page_error), sig::seh_category()))
+						{
+							// we get this exception code when the disk is full
+							ec.ec.assign(boost::system::errc::no_space_on_device, generic_category());
+						}
+						else
+#endif
+						{
+							ec.ec = err.code();
+						}
 						return;
 					}
 				}
@@ -566,27 +586,37 @@ namespace libtorrent {
 			int ret = 0;
 			error_code e;
 			span<byte const> file_range = handle->range();
-			if (file_range.size() > file_offset)
-			{
-				file_range = file_range.subspan(static_cast<std::ptrdiff_t>(file_offset));
-				for (auto buf : vec)
-				{
-					if (file_range.empty()) break;
-					if (file_range.size() < buf.size()) buf = buf.first(file_range.size());
-
-					sig::try_signal([&]{
-						std::memcpy(buf.data(), const_cast<char*>(file_range.data())
-							, static_cast<std::size_t>(buf.size()));
-					});
-
-					file_range = file_range.subspan(buf.size());
-					ret += static_cast<int>(buf.size());
-				}
-			}
 
 			// set this unconditionally in case the upper layer would like to treat
 			// short reads as errors
 			ec.operation = operation_t::file_read;
+
+			try
+			{
+				if (file_range.size() > file_offset)
+				{
+					file_range = file_range.subspan(static_cast<std::ptrdiff_t>(file_offset));
+					for (auto buf : vec)
+					{
+						if (file_range.empty()) break;
+						if (file_range.size() < buf.size()) buf = buf.first(file_range.size());
+
+						sig::try_signal([&]{
+							std::memcpy(buf.data(), const_cast<char*>(file_range.data())
+								, static_cast<std::size_t>(buf.size()));
+							});
+
+						file_range = file_range.subspan(buf.size());
+						ret += static_cast<int>(buf.size());
+					}
+				}
+			}
+			catch (std::system_error const& err)
+			{
+				ec.file(file_index);
+				ec.ec = err.code();
+				return -1;
+			}
 
 			// we either get an error or 0 or more bytes read
 			TORRENT_ASSERT(e || ret > 0);
@@ -651,25 +681,45 @@ namespace libtorrent {
 			int ret = 0;
 			error_code e;
 			span<byte> file_range = handle->range().subspan(static_cast<std::ptrdiff_t>(file_offset));
-			for (auto buf : vec)
+
+			// set this unconditionally in case the upper layer would like to treat
+			// short reads as errors
+			ec.operation = operation_t::file_write;
+
+			try
 			{
-				TORRENT_ASSERT(file_range.size() >= buf.size());
+				for (auto buf : vec)
+				{
+					TORRENT_ASSERT(file_range.size() >= buf.size());
 
-				sig::try_signal([&]{
-					std::memcpy(const_cast<char*>(file_range.data()), buf.data(), static_cast<std::size_t>(buf.size()));
-				});
+					sig::try_signal([&]{
+						std::memcpy(const_cast<char*>(file_range.data()), buf.data(), static_cast<std::size_t>(buf.size()));
+						});
 
-				file_range = file_range.subspan(buf.size());
-				ret += static_cast<int>(buf.size());
+					file_range = file_range.subspan(buf.size());
+					ret += static_cast<int>(buf.size());
+				}
+			}
+			catch (std::system_error const& err)
+			{
+				ec.file(file_index);
+#ifdef TORRENT_WINDOWS
+				if (err.code() == std::error_code(int(sig::seh_errors::in_page_error), sig::seh_category()))
+				{
+					// we get this exception code when the disk is full
+					ec.ec.assign(boost::system::errc::no_space_on_device, generic_category());
+				}
+				else
+#endif
+				{
+					ec.ec = err.code();
+				}
+				return -1;
 			}
 
 #if TORRENT_HAVE_MAP_VIEW_OF_FILE
 			m_pool.record_file_write(storage_index(), file_index, ret);
 #endif
-
-			// set this unconditionally in case the upper layer would like to treat
-			// short reads as errors
-			ec.operation = operation_t::file_write;
 
 			if (e)
 			{
