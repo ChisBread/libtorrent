@@ -2490,7 +2490,18 @@ bool is_downloading_state(int const st)
 		num_outstanding -= (static_cast<int>(m_checking_piece)
 			- static_cast<int>(m_num_checked_pieces));
 		if (num_outstanding < 0) num_outstanding = 0;
-
+		// init noskip_pieces
+		if(is_fast_checking){
+			std::lock_guard<std::mutex> g(m_noskip_pieces_mtx);
+			file_storage const&fs = m_torrent_file->files();
+			if(m_noskip_pieces.empty()){
+				for(int i = 0; i < fs.num_files(); ++i) {
+					auto const range = file_piece_range_inclusive(fs, file_index_t(i));
+					m_noskip_pieces.emplace(std::get<0>(range));
+					m_noskip_pieces.emplace(std::get<1>(range));
+				}
+			}
+		}
 		for (int i = 0; i < num_outstanding; ++i)
 		{
 			m_ses.disk_thread().async_hash(m_storage, m_checking_piece
@@ -2498,12 +2509,18 @@ bool is_downloading_state(int const st)
 				, std::bind(&torrent::on_piece_hashed
 					, shared_from_this(), _1, _2, _3, is_fast_checking));
 			// check or not?
-			bool skip_enable = is_fast_checking && fast_checking_global && (SKIP_PIECE_LEN*4 < m_torrent_file->end_piece());
-			if(skip_enable) m_checking_piece_fast_mtx.lock();
-			if(skip_enable && m_checking_piece%SKIP_PIECE_LEN == 0) {
-				piece_index_t begin = m_checking_piece+=1;
-				piece_index_t end = m_checking_piece+=(SKIP_PIECE_LEN-1);
+			bool skip_enable = is_fast_checking && fast_checking_global;
+			if(skip_enable) {
+				m_checking_piece_fast_mtx.lock();
+				piece_index_t begin = m_checking_piece, end;
+				int next_offset = SKIP_PIECE_LEN-int(m_checking_piece%SKIP_PIECE_LEN);
+				auto it = m_noskip_pieces.upper_bound(piece_index_t(int(m_checking_piece)+1));
+				if(it != m_noskip_pieces.end() && int(*it - m_checking_piece) < next_offset) {
+					next_offset = int(*it - m_checking_piece);
+				}
+				end = m_checking_piece+=next_offset;
 				m_checking_piece_fast_mtx.unlock();
+				++begin;
 				for(piece_index_t i = begin; i < end; ++i) {
 					if (i >= m_torrent_file->end_piece()) break;
 					if (m_num_checked_pieces >= m_torrent_file->end_piece()) break;
@@ -2520,7 +2537,6 @@ bool is_downloading_state(int const st)
 				}
 			} else {
 				++m_checking_piece;
-				if(skip_enable) m_checking_piece_fast_mtx.unlock();
 			}
 			if (m_checking_piece >= m_torrent_file->end_piece()) break;
 		}
@@ -2648,12 +2664,18 @@ bool is_downloading_state(int const st)
 				, std::bind(&torrent::on_piece_hashed
 					, shared_from_this(), _1, _2, _3, is_fast_checking));
 			// check or not?
-			bool skip_enable = is_fast_checking && fast_checking_global && (SKIP_PIECE_LEN*4 < m_torrent_file->end_piece());
-			if(skip_enable) m_checking_piece_fast_mtx.lock();
-			if(skip_enable && m_checking_piece%SKIP_PIECE_LEN == 0) {
-				piece_index_t begin = m_checking_piece+=1;
-				piece_index_t end = m_checking_piece+=(SKIP_PIECE_LEN-1);
+			bool skip_enable = is_fast_checking && fast_checking_global;
+			if(skip_enable) {
+				m_checking_piece_fast_mtx.lock();
+				piece_index_t begin = m_checking_piece, end;
+				int next_offset = SKIP_PIECE_LEN-int(m_checking_piece%SKIP_PIECE_LEN);
+				auto it = m_noskip_pieces.upper_bound(piece_index_t(int(m_checking_piece)+1));
+				if(it != m_noskip_pieces.end() && int(*it - m_checking_piece) < next_offset) {
+					next_offset = int(*it - m_checking_piece);
+				}
+				end = m_checking_piece+=next_offset;
 				m_checking_piece_fast_mtx.unlock();
+				++begin;
 				for(piece_index_t i = begin; i < end; ++i) {
 					if (i >= m_torrent_file->end_piece()) break;
 					if (m_num_checked_pieces >= m_torrent_file->end_piece()) break;
@@ -2670,7 +2692,6 @@ bool is_downloading_state(int const st)
 				}
 			} else {
 				++m_checking_piece;
-				if(skip_enable) m_checking_piece_fast_mtx.unlock();
 			}
 #ifndef TORRENT_DISABLE_LOGGING
 			debug_log("on_piece_hashed, m_checking_piece: %d"

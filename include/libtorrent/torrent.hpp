@@ -244,6 +244,9 @@ namespace libtorrent {
 		// the case there is no piece picker, see m_have_all.
 		std::unique_ptr<piece_picker> m_picker;
 
+
+		std::set<piece_index_t> m_noskip_pieces;
+		std::mutex m_noskip_pieces_mtx;
 		// TODO: make this a raw pointer. perhaps keep the shared_ptr
 		// around further down the object to maintain an owner
 		std::shared_ptr<torrent_info> m_torrent_file;
