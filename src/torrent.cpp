@@ -132,6 +132,7 @@ bool is_downloading_state(int const st)
 }
 } // anonymous namespace
 
+	bool fast_checking_global = true;
 	constexpr web_seed_flag_t torrent::ephemeral;
 
 	web_seed_t::web_seed_t(web_seed_entry const& wse)
@@ -2458,10 +2459,12 @@ bool is_downloading_state(int const st)
 	}
 	catch (...) { handle_exception(); }
 
-	void torrent::start_checking()
+	void torrent::start_checking(bool is_fast_checking)
 	{
 		TORRENT_ASSERT(should_check_files());
-
+		if(m_dirty_check_failed) {
+			is_fast_checking = m_dirty_check_failed = false;
+		}
 		int num_outstanding = settings().get_int(settings_pack::checking_mem_usage) * block_size()
 			/ m_torrent_file->piece_length();
 		// if we only keep a single read operation in-flight at a time, we suffer
@@ -2490,10 +2493,15 @@ bool is_downloading_state(int const st)
 
 		for (int i = 0; i < num_outstanding; ++i)
 		{
+			bool skip_check = false;
+			while(skip_check = !m_dirty_check_failed && is_fast_checking && fast_checking_global && m_checking_piece%256!=0) {
+				on_piece_verified(m_checking_piece, m_torrent_file->hash_for_piece(m_checking_piece), storage_error{});
+				++m_checking_piece;
+			}
 			m_ses.disk_thread().async_hash(m_storage, m_checking_piece
 				, disk_interface::sequential_access | disk_interface::volatile_read
 				, std::bind(&torrent::on_piece_hashed
-					, shared_from_this(), _1, _2, _3));
+					, shared_from_this(), _1, _2, _3, is_fast_checking));
 			++m_checking_piece;
 			if (m_checking_piece >= m_torrent_file->end_piece()) break;
 		}
@@ -2506,7 +2514,7 @@ bool is_downloading_state(int const st)
 	// This is only used for checking of torrents. i.e. force-recheck or initial checking
 	// of existing files
 	void torrent::on_piece_hashed(piece_index_t const piece
-		, sha1_hash const& piece_hash, storage_error const& error) try
+		, sha1_hash const& piece_hash, storage_error const& error, bool is_fast_checking) try
 	{
 		TORRENT_ASSERT(is_single_thread());
 		INVARIANT_CHECK;
@@ -2585,6 +2593,9 @@ bool is_downloading_state(int const st)
 			// if the hash failed, remove it from the cache
 			if (m_storage)
 				m_ses.disk_thread().clear_piece(m_storage, piece);
+			if(is_fast_checking) {
+				m_dirty_check_failed = true;
+			}
 		}
 
 		if (m_num_checked_pieces < m_torrent_file->end_piece())
@@ -2613,11 +2624,16 @@ bool is_downloading_state(int const st)
 				}
 				return;
 			}
-
+			// check or not?
+			bool skip_check = false;
+			while(skip_check = !m_dirty_check_failed && is_fast_checking && fast_checking_global && m_checking_piece%256!=0) {
+				on_piece_verified(m_checking_piece, m_torrent_file->hash_for_piece(m_checking_piece), storage_error{});
+				++m_checking_piece;
+			}
 			m_ses.disk_thread().async_hash(m_storage, m_checking_piece
 				, disk_interface::sequential_access | disk_interface::volatile_read
 				, std::bind(&torrent::on_piece_hashed
-					, shared_from_this(), _1, _2, _3));
+					, shared_from_this(), _1, _2, _3, is_fast_checking));
 			++m_checking_piece;
 #ifndef TORRENT_DISABLE_LOGGING
 			debug_log("on_piece_hashed, m_checking_piece: %d"

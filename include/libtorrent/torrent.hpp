@@ -406,9 +406,9 @@ namespace libtorrent {
 		void on_resume_data_checked(status_t status, storage_error const& error);
 		void on_force_recheck(status_t status, storage_error const& error);
 		void on_piece_hashed(piece_index_t piece, sha1_hash const& piece_hash
-			, storage_error const& error);
+			, storage_error const& error, bool is_fast_checking = false);
 		void files_checked();
-		void start_checking();
+		void start_checking(bool is_fast_checking = true);
 
 		void start_announcing();
 		void stop_announcing();
@@ -1441,6 +1441,8 @@ namespace libtorrent {
 		// if we're finished, this is the timestamp of when we finished
 		time_point32 m_became_finished = aux::time_now32();
 
+		// failed on dirty checking
+		bool m_dirty_check_failed = false;
 		// when checking, this is the first piece we have not
 		// issued a hash job for
 		piece_index_t m_checking_piece{0};
