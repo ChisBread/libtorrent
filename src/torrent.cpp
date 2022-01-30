@@ -106,7 +106,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #endif
 
 #include "libtorrent/aux_/torrent_impl.hpp"
-
+#define SKIP_PIECE_LEN 128
 using namespace std::placeholders;
 
 namespace libtorrent {
@@ -2493,16 +2493,35 @@ bool is_downloading_state(int const st)
 
 		for (int i = 0; i < num_outstanding; ++i)
 		{
-			bool skip_check = false;
-			while(skip_check = !m_dirty_check_failed && is_fast_checking && fast_checking_global && m_checking_piece%256!=0) {
-				on_piece_verified(m_checking_piece, m_torrent_file->hash_for_piece(m_checking_piece), storage_error{});
-				++m_checking_piece;
-			}
 			m_ses.disk_thread().async_hash(m_storage, m_checking_piece
 				, disk_interface::sequential_access | disk_interface::volatile_read
 				, std::bind(&torrent::on_piece_hashed
 					, shared_from_this(), _1, _2, _3, is_fast_checking));
-			++m_checking_piece;
+			// check or not?
+			bool skip_enable = is_fast_checking && fast_checking_global && (SKIP_PIECE_LEN*4 < m_torrent_file->end_piece());
+			if(skip_enable) m_checking_piece_fast_mtx.lock();
+			if(skip_enable && m_checking_piece%SKIP_PIECE_LEN == 0) {
+				piece_index_t begin = m_checking_piece+=1;
+				piece_index_t end = m_checking_piece+=(SKIP_PIECE_LEN-1);
+				m_checking_piece_fast_mtx.unlock();
+				for(piece_index_t i = begin; i < end; ++i) {
+					if (i >= m_torrent_file->end_piece()) break;
+					if (m_num_checked_pieces >= m_torrent_file->end_piece()) break;
+					state_updated();
+					++m_num_checked_pieces;
+					m_progress_ppm = std::uint32_t(std::int64_t(static_cast<int>(m_num_checked_pieces))
+						* 1000000 / torrent_file().num_pieces());
+					if (has_picker() || !m_have_all) {
+						need_picker();
+						m_picker->we_have(i);
+						update_gauge();
+					}
+					we_have(i);
+				}
+			} else {
+				++m_checking_piece;
+				if(skip_enable) m_checking_piece_fast_mtx.unlock();
+			}
 			if (m_checking_piece >= m_torrent_file->end_piece()) break;
 		}
 #ifndef TORRENT_DISABLE_LOGGING
@@ -2624,17 +2643,35 @@ bool is_downloading_state(int const st)
 				}
 				return;
 			}
-			// check or not?
-			bool skip_check = false;
-			while(skip_check = !m_dirty_check_failed && is_fast_checking && fast_checking_global && m_checking_piece%256!=0) {
-				on_piece_verified(m_checking_piece, m_torrent_file->hash_for_piece(m_checking_piece), storage_error{});
-				++m_checking_piece;
-			}
 			m_ses.disk_thread().async_hash(m_storage, m_checking_piece
 				, disk_interface::sequential_access | disk_interface::volatile_read
 				, std::bind(&torrent::on_piece_hashed
 					, shared_from_this(), _1, _2, _3, is_fast_checking));
-			++m_checking_piece;
+			// check or not?
+			bool skip_enable = is_fast_checking && fast_checking_global && (SKIP_PIECE_LEN*4 < m_torrent_file->end_piece());
+			if(skip_enable) m_checking_piece_fast_mtx.lock();
+			if(skip_enable && m_checking_piece%SKIP_PIECE_LEN == 0) {
+				piece_index_t begin = m_checking_piece+=1;
+				piece_index_t end = m_checking_piece+=(SKIP_PIECE_LEN-1);
+				m_checking_piece_fast_mtx.unlock();
+				for(piece_index_t i = begin; i < end; ++i) {
+					if (i >= m_torrent_file->end_piece()) break;
+					if (m_num_checked_pieces >= m_torrent_file->end_piece()) break;
+					state_updated();
+					++m_num_checked_pieces;
+					m_progress_ppm = std::uint32_t(std::int64_t(static_cast<int>(m_num_checked_pieces))
+						* 1000000 / torrent_file().num_pieces());
+					if (has_picker() || !m_have_all) {
+						need_picker();
+						m_picker->we_have(i);
+						update_gauge();
+					}
+					we_have(i);
+				}
+			} else {
+				++m_checking_piece;
+				if(skip_enable) m_checking_piece_fast_mtx.unlock();
+			}
 #ifndef TORRENT_DISABLE_LOGGING
 			debug_log("on_piece_hashed, m_checking_piece: %d"
 				, static_cast<int>(m_checking_piece));

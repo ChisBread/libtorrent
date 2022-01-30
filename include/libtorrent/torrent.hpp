@@ -40,6 +40,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <deque>
 #include <limits> // for numeric_limits
 #include <memory> // for unique_ptr
+#include <mutex>
 
 #include "libtorrent/fwd.hpp"
 #include "libtorrent/optional.hpp"
@@ -1446,7 +1447,7 @@ namespace libtorrent {
 		// when checking, this is the first piece we have not
 		// issued a hash job for
 		piece_index_t m_checking_piece{0};
-
+		std::mutex m_checking_piece_fast_mtx;
 		// the number of pieces we completed the check of
 		piece_index_t m_num_checked_pieces{0};
 
