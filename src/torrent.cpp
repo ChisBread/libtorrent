@@ -2633,7 +2633,37 @@ bool is_downloading_state(int const st)
 			}
 		}
 
-		if (m_num_checked_pieces < m_torrent_file->end_piece())
+		if(is_fast_checking && fast_checking_global && m_dirty_check_failed) {
+			std::lock_guard<std::mutex> g(m_checking_piece_fast_mtx);
+			// forget that we have any pieces
+			m_have_all = false;
+			// removing the piece picker will clear the user priorities
+			// instead, just clear which pieces we have
+			if (m_picker)
+			{
+				int const blocks_per_piece = (m_torrent_file->piece_length() + block_size() - 1) / block_size();
+				int const blocks_in_last_piece = ((m_torrent_file->total_size() % m_torrent_file->piece_length())
+					+ block_size() - 1) / block_size();
+				m_picker->resize(blocks_per_piece, blocks_in_last_piece, m_torrent_file->num_pieces());
+
+				m_file_progress.clear();
+				m_file_progress.init(picker(), m_torrent_file->files());
+			}
+			// assume that we don't have anything
+			m_files_checked = false;
+			update_gauge();
+			state_updated();
+			m_progress_ppm = 0;
+			m_checking_piece = piece_index_t(0);
+			m_num_checked_pieces = piece_index_t(0);
+			m_ses.disk_thread().async_hash(m_storage, m_checking_piece
+				, disk_interface::sequential_access | disk_interface::volatile_read
+				, std::bind(&torrent::on_piece_hashed
+					, shared_from_this(), _1, _2, _3, false));
+			++m_checking_piece;
+			return;
+		}
+		else if (m_num_checked_pieces < m_torrent_file->end_piece())
 		{
 			// we're not done yet, issue another job
 			if (m_checking_piece >= m_torrent_file->end_piece())
@@ -2699,7 +2729,6 @@ bool is_downloading_state(int const st)
 #endif
 			return;
 		}
-
 #ifndef TORRENT_DISABLE_LOGGING
 		debug_log("on_piece_hashed, completed");
 #endif
