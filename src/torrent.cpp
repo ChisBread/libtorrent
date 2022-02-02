@@ -589,8 +589,8 @@ bool is_downloading_state(int const st)
 		m_seed_mode = false;
 		// seed is false if we turned out not
 		// to be a seed after all
-		if (checking == seed_mode_t::check_files
-			&& state() != torrent_status::checking_resume_data)
+		if ( m_dirty_check_failed || (checking == seed_mode_t::check_files
+			&& state() != torrent_status::checking_resume_data))
 		{
 			m_have_all = false;
 			set_state(torrent_status::downloading);
@@ -705,7 +705,10 @@ bool is_downloading_state(int const st)
 		update_want_scrape();
 		update_want_tick();
 		update_state_list();
-
+		if(m_dirty_check_failed) {
+			force_recheck();
+		}
+		else
 #if TORRENT_ABI_VERSION == 1
 		// deprecated in 1.2
 		if (!m_torrent_file->is_valid() && !m_url.empty())
@@ -2560,9 +2563,21 @@ bool is_downloading_state(int const st)
 		state_updated();
 
 		++m_num_checked_pieces;
-
+		if(m_dirty_check_failed) {
+			m_checking_piece = piece_index_t{0};
+			m_num_checked_pieces = piece_index_t{0};
+			auto_managed(false);
+			pause();
+			// recalculate auto-managed torrents sooner
+			// in order to start checking the next torrent
+			m_ses.trigger_auto_manage();
+			return;
+		}
 		if (error)
 		{
+			if(is_fast_checking) {
+				m_dirty_check_failed = true;
+			}
 			if (error.ec == boost::system::errc::no_such_file_or_directory
 				|| error.ec == boost::asio::error::eof
 #ifdef TORRENT_WINDOWS
@@ -2570,6 +2585,7 @@ bool is_downloading_state(int const st)
 #endif
 				)
 			{
+				m_checking_piece_fast_mtx.lock();
 				TORRENT_ASSERT(error.file() >= file_index_t(0));
 
 				// skip this file by updating m_checking_piece to the first piece following it
@@ -2582,6 +2598,7 @@ bool is_downloading_state(int const st)
 					m_num_checked_pieces = piece_index_t(static_cast<int>(m_num_checked_pieces) + diff);
 					m_checking_piece = last;
 				}
+				m_checking_piece_fast_mtx.unlock();
 			}
 			else
 			{
@@ -2632,38 +2649,17 @@ bool is_downloading_state(int const st)
 				m_dirty_check_failed = true;
 			}
 		}
-
-		if(is_fast_checking && fast_checking_global && m_dirty_check_failed) {
-			std::lock_guard<std::mutex> g(m_checking_piece_fast_mtx);
-			// forget that we have any pieces
-			m_have_all = false;
-			// removing the piece picker will clear the user priorities
-			// instead, just clear which pieces we have
-			if (m_picker)
-			{
-				int const blocks_per_piece = (m_torrent_file->piece_length() + block_size() - 1) / block_size();
-				int const blocks_in_last_piece = ((m_torrent_file->total_size() % m_torrent_file->piece_length())
-					+ block_size() - 1) / block_size();
-				m_picker->resize(blocks_per_piece, blocks_in_last_piece, m_torrent_file->num_pieces());
-
-				m_file_progress.clear();
-				m_file_progress.init(picker(), m_torrent_file->files());
-			}
-			// assume that we don't have anything
-			m_files_checked = false;
-			update_gauge();
-			state_updated();
-			m_progress_ppm = 0;
-			m_checking_piece = piece_index_t(0);
-			m_num_checked_pieces = piece_index_t(0);
-			m_ses.disk_thread().async_hash(m_storage, m_checking_piece
-				, disk_interface::sequential_access | disk_interface::volatile_read
-				, std::bind(&torrent::on_piece_hashed
-					, shared_from_this(), _1, _2, _3, false));
-			++m_checking_piece;
+		if(m_dirty_check_failed) {
+			m_checking_piece = piece_index_t{0};
+			m_num_checked_pieces = piece_index_t{0};
+			auto_managed(false);
+			pause();
+			// recalculate auto-managed torrents sooner
+			// in order to start checking the next torrent
+			m_ses.trigger_auto_manage();
 			return;
 		}
-		else if (m_num_checked_pieces < m_torrent_file->end_piece())
+		if (m_num_checked_pieces < m_torrent_file->end_piece())
 		{
 			// we're not done yet, issue another job
 			if (m_checking_piece >= m_torrent_file->end_piece())
@@ -7767,9 +7763,8 @@ bool is_downloading_state(int const st)
 			&& m_state != torrent_status::checking_files);
 
 		// we're downloading now, which means we're no longer in seed mode
-		if (m_seed_mode)
+		if (m_seed_mode || m_dirty_check_failed)
 			leave_seed_mode(seed_mode_t::check_files);
-
 		TORRENT_ASSERT(!is_finished());
 		set_state(torrent_status::downloading);
 		set_queue_position(last_pos);
@@ -7911,7 +7906,9 @@ bool is_downloading_state(int const st)
 		// we might be finished already, in which case we should
 		// not switch to downloading mode. If all files are
 		// filtered, we're finished when we start.
-		if (m_state != torrent_status::finished
+		if(m_dirty_check_failed) {
+			force_recheck();
+		} else if (m_state != torrent_status::finished
 			&& m_state != torrent_status::seeding
 			&& !m_seed_mode)
 		{
